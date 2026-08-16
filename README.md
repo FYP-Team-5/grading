@@ -175,8 +175,17 @@ make ci
 Tests use SQLite, fake Qdrant clients, and in-memory HTTP transports; they do not
 require running storage or LLM services.
 
-The [GitHub Actions workflow](.github/workflows/ci.yml) runs on every push and pull
-request. Its lint and test jobs run independently on Python 3.12, matching the
-Docker image. Dependencies are installed directly in the workflow from
+The [GitHub Actions workflow](.github/workflows/ci.yml) runs on every pull request
+and every push outside `main`. Its lint and test jobs run independently on Python 3.12,
+matching the Docker image. Dependencies are installed directly in the workflow from
 `requirements.txt`; there is no separate CI requirements file. The lint job runs
 `python -m ruff check app tests`, and the test job runs `python -m pytest -q`.
+
+The [post-merge workflow](.github/workflows/post-merge.yml) runs for each push to
+`main`, including merged pull requests. It reruns lint and tests, then creates a tag
+only when both pass. Tags start at `v0.1` and increment the minor component (`v0.2`,
+`v0.3`, and so on). A rerun for an already-tagged commit reuses its tag.
+
+The post-merge workflow also contains a fully commented `build-and-push` job for
+publishing the versioned image and `latest` to GitHub Container Registry. Uncomment
+that job when image publishing is wanted; it requires `packages: write` permission.
