@@ -1,23 +1,28 @@
 # Student answer grading service
 
-A self-hosted FastAPI microservice that retrieves passages for one rubric from the
-existing RAG service, sends those passages and a student answer to an external local
-LLM, and returns a validated structured grade.
+A self-hosted FastAPI microservice that reads rubric metadata from the PostgreSQL
+database owned by the RAG service, retrieves that rubric's chunks directly from the
+shared Qdrant collection, and sends them with a student answer to an external local
+LLM.
 
 ```text
 Frontend --answer + rubric ID--> Grading API
                                       |
-                                      +--filtered search--> Rubric RAG API
+                                      +--rubric metadata--> PostgreSQL
                                       |
-                                      +--rubric + answer--> Local LLM
+                                      +--chunk IDs--------> Qdrant
+                                      |
+                                      +--chunks + answer--> Local LLM
                                       |
 Frontend <----score + feedback + retrieved evidence
 ```
 
-The grading service deliberately uses the RAG HTTP API instead of reading Qdrant
-directly. The RAG service remains responsible for embeddings, vector-store schema,
-and filtering. Every retrieval request includes `rubric_id`, preventing criteria
-from another assignment from entering the grading prompt.
+The RAG service remains the only writer and continues to own uploads, processing,
+embeddings, and storage schema. The grading service is read-only. It resolves the
+requested rubric in PostgreSQL, verifies processing is complete, loads its ordered
+`chunk_ids`, and retrieves those exact Qdrant payloads without creating a query
+embedding. Each payload's `rubric_id` and `document_id` are checked against the
+PostgreSQL record before the text enters the grading prompt.
 
 ## API contract
 
@@ -32,8 +37,8 @@ curl -X POST http://localhost:8001/api/v1/rubrics/history-short-answer-v1/grade 
   }'
 ```
 
-`question` is optional. `retrieval_k` and `score_threshold` may also be supplied per
-request to override their configured retrieval defaults.
+`question` is optional. The service retrieves all chunks recorded for the rubric so
+that every grading criterion is available to the LLM.
 
 Example response:
 
@@ -54,8 +59,8 @@ Example response:
   ],
   "retrieved_chunks": [
     {
+      "id": "442715d6-f5e2-4d1c-a78e-950ced8cd2c7",
       "content": "5 points: The response is factually accurate...",
-      "similarity_score": 0.88,
       "metadata": {
         "rubric_id": "history-short-answer-v1",
         "chunk_index": 2
@@ -71,8 +76,10 @@ maximums.
 
 ## Dependencies
 
-The rubric RAG service must be running and the selected rubric must already be
-processed. See `../rag/README.md` for rubric upload and processing instructions.
+The RAG Compose project must be running because this container joins its
+`rubric-rag_default` network and connects to the `postgres` and `qdrant` services by
+name. The selected rubric must already be processed. See `../rag/README.md` for
+rubric upload and processing instructions.
 
 The LLM must expose an OpenAI-compatible chat completions endpoint:
 
@@ -108,25 +115,29 @@ docker compose up --build -d
 docker compose ps
 ```
 
-The container reaches services on the workstation through
+The container joins the existing `rubric-rag_default` Docker network for PostgreSQL
+and Qdrant. It reaches the local LLM on the workstation through
 `host.docker.internal`. Defaults are:
 
 - Grading Swagger UI: <http://localhost:8001/docs>
 - Grading health: <http://localhost:8001/health>
-- RAG API: <http://host.docker.internal:8000>
+- PostgreSQL: `postgres:5432/rag`
+- Qdrant: `http://qdrant:6333`, collection `rubric_chunks`
 - Local LLM: <http://host.docker.internal:11434/v1/chat/completions>
 
-Health returns `503` unless both the RAG health endpoint and the LLM models endpoint
-are reachable. If `API_KEY` is configured, frontend grading calls must include it in
-the `X-API-Key` header; `/health` remains unauthenticated. `RAG_API_KEY` is sent only
-to the downstream RAG service. `LLM_API_KEY`, when set, is sent as a Bearer token.
+Health returns `503` unless PostgreSQL, the configured Qdrant collection, and the
+LLM models endpoint are reachable. If `API_KEY` is configured, frontend grading
+calls must include it in the `X-API-Key` header; `/health` remains unauthenticated.
+`LLM_API_KEY`, when set, is sent as a Bearer token.
 
 ## Run without Docker
 
 When the grading process runs directly on the workstation, use localhost URLs:
 
 ```dotenv
-RAG_URL=http://localhost:8000
+DATABASE_URL=postgresql+psycopg://rag:rag@localhost:5432/rag
+QDRANT_URL=http://localhost:6333
+QDRANT_COLLECTION=rubric_chunks
 LLM_URL=http://localhost:11434/v1/chat/completions
 LLM_MODEL=your-local-model
 ```
@@ -143,19 +154,29 @@ uvicorn app.main:app --host 0.0.0.0 --port 8001
 ## Configuration
 
 All settings are environment variables; see `.env.example`. The most important are
-`RAG_URL`, `RAG_API_KEY`, `RETRIEVAL_K`, `RETRIEVAL_SCORE_THRESHOLD`, `LLM_URL`,
-`LLM_MODEL`, `LLM_API_KEY`, timeout/retry settings, CORS origins, and the optional
-inbound `API_KEY`.
+`DATABASE_URL`, `QDRANT_URL`, `QDRANT_COLLECTION`, `QDRANT_API_KEY`, `LLM_URL`,
+`LLM_MODEL`, `LLM_API_KEY`, timeout settings, CORS origins, and the optional inbound
+`API_KEY`. Database credentials and the collection name must match the RAG service.
 
-Semantic retrieval selects the rubric passages most relevant to the question and
-answer. If a rubric is short and every criterion must always be graded, set
-`RETRIEVAL_K` high enough to cover all chunks; the RAG service caps it at 50.
-
-## Test
+## Develop, lint, and test
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install ruff==0.16.3
 make test
 make lint
+# Or run both:
+make ci
 ```
 
-Tests use in-memory HTTP transports and do not require a running RAG or LLM service.
+Tests use SQLite, fake Qdrant clients, and in-memory HTTP transports; they do not
+require running storage or LLM services.
+
+The [GitHub Actions workflow](.github/workflows/ci.yml) runs on every push and pull
+request. Its lint and test jobs run independently on Python 3.12, matching the
+Docker image. Dependencies are installed directly in the workflow from
+`requirements.txt`; there is no separate CI requirements file. The lint job runs
+`python -m ruff check app tests`, and the test job runs `python -m pytest -q`.

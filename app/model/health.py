@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class HealthResponse(BaseModel):
     status: Literal["ok"]
-    rag: Literal["ok"]
+    postgres: Literal["ok"]
+    qdrant: Literal["ok"]
     llm: Literal["ok"]
     model: str

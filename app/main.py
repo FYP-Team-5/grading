@@ -11,7 +11,7 @@ from app.controller import health_router, router
 from app.service import GradingService
 
 OPENAPI_TAGS = [
-    {"name": "health", "description": "Dependency readiness status."},
+    {"name": "health", "description": "Storage and LLM dependency readiness status."},
     {
         "name": "grading",
         "description": "Retrieve rubric context and grade student answers.",
@@ -45,8 +45,8 @@ def create_app(
         title=settings.app_name,
         version=settings.app_version,
         description=(
-            "Retrieve rubric passages from the RAG service and grade student answers "
-            "with an OpenAI-compatible local LLM."
+            "Read rubric metadata from PostgreSQL, retrieve its chunks from Qdrant, "
+            "and grade student answers with an OpenAI-compatible local LLM."
         ),
         lifespan=lifespan,
         openapi_tags=OPENAPI_TAGS,

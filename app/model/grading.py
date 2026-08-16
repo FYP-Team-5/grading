@@ -6,8 +6,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class GradeRequest(BaseModel):
     student_answer: str = Field(min_length=1)
     question: str | None = Field(default=None, max_length=10_000)
-    retrieval_k: int | None = Field(default=None, ge=1, le=50)
-    score_threshold: float | None = Field(default=None, ge=-1, le=1)
 
     @field_validator("student_answer")
     @classmethod
@@ -18,8 +16,8 @@ class GradeRequest(BaseModel):
 
 
 class RetrievedRubricChunk(BaseModel):
+    id: str
     content: str
-    similarity_score: float
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

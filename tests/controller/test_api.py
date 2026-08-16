@@ -3,9 +3,10 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.db import QdrantStoreError, RubricMetadataNotFoundError
 from app.main import create_app
 from app.model import CriterionGrade, GradeResponse, RetrievedRubricChunk
-from app.service import EmptyRubricContextError, LLMServiceError, RAGServiceError
+from app.service import LLMServiceError, RubricProcessingIncompleteError
 
 
 class FakeService:
@@ -20,7 +21,7 @@ class FakeService:
         pass
 
     async def health(self) -> dict[str, bool]:
-        return {"rag": True, "llm": True}
+        return {"postgres": True, "qdrant": True, "llm": True}
 
     async def grade(self, rubric_id, request) -> GradeResponse:
         self.requests.append((rubric_id, request))
@@ -40,8 +41,8 @@ class FakeService:
             ],
             retrieved_chunks=[
                 RetrievedRubricChunk(
+                    id="chunk-1",
                     content="Award up to five points for accuracy.",
-                    similarity_score=0.91,
                     metadata={"rubric_id": rubric_id, "chunk_index": 0},
                 )
             ],
@@ -50,17 +51,22 @@ class FakeService:
 
 class UnhealthyService(FakeService):
     async def health(self) -> dict[str, bool]:
-        return {"rag": False, "llm": True}
+        return {"postgres": True, "qdrant": False, "llm": True}
 
 
-class EmptyContextService(FakeService):
+class MissingRubricService(FakeService):
     async def grade(self, rubric_id, request) -> GradeResponse:
-        raise EmptyRubricContextError("No rubric context was retrieved.")
+        raise RubricMetadataNotFoundError(rubric_id)
 
 
-class FailingRAGService(FakeService):
+class ProcessingRubricService(FakeService):
     async def grade(self, rubric_id, request) -> GradeResponse:
-        raise RAGServiceError("offline")
+        raise RubricProcessingIncompleteError("Rubric processing is processing.")
+
+
+class FailingQdrantService(FakeService):
+    async def grade(self, rubric_id, request) -> GradeResponse:
+        raise QdrantStoreError("offline")
 
 
 class FailingLLMService(FakeService):
@@ -93,7 +99,7 @@ def test_frontend_can_submit_answer_for_rubric(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.json()["rubric_id"] == "history-v1"
     assert response.json()["percentage"] == 80
-    assert response.json()["retrieved_chunks"][0]["similarity_score"] == 0.91
+    assert response.json()["retrieved_chunks"][0]["id"] == "chunk-1"
     assert service.requests[0][1].student_answer.startswith("It occurred")
 
 
@@ -145,7 +151,8 @@ def test_health_and_openapi(tmp_path: Path) -> None:
 
     assert health.json() == {
         "status": "ok",
-        "rag": "ok",
+        "postgres": "ok",
+        "qdrant": "ok",
         "llm": "ok",
         "model": "local-model",
     }
@@ -159,20 +166,27 @@ def test_unhealthy_dependency_returns_service_unavailable(tmp_path: Path) -> Non
         response = client.get("/health")
 
     assert response.status_code == 503
-    assert response.json() == {"detail": {"rag": "unavailable", "llm": "ok"}}
+    assert response.json() == {
+        "detail": {"postgres": "ok", "qdrant": "unavailable", "llm": "ok"}
+    }
 
 
 def test_dependency_failures_are_mapped(tmp_path: Path) -> None:
-    empty_client, _ = make_client(tmp_path, service_type=EmptyContextService)
-    rag_client, _ = make_client(tmp_path, service_type=FailingRAGService)
+    missing_client, _ = make_client(tmp_path, service_type=MissingRubricService)
+    processing_client, _ = make_client(tmp_path, service_type=ProcessingRubricService)
+    qdrant_client, _ = make_client(tmp_path, service_type=FailingQdrantService)
     llm_client, _ = make_client(tmp_path, service_type=FailingLLMService)
 
-    with empty_client:
-        empty = empty_client.post(
+    with missing_client:
+        missing = missing_client.post(
             "/api/v1/rubrics/history-v1/grade", json={"student_answer": "answer"}
         )
-    with rag_client:
-        rag = rag_client.post(
+    with processing_client:
+        processing = processing_client.post(
+            "/api/v1/rubrics/history-v1/grade", json={"student_answer": "answer"}
+        )
+    with qdrant_client:
+        qdrant = qdrant_client.post(
             "/api/v1/rubrics/history-v1/grade", json={"student_answer": "answer"}
         )
     with llm_client:
@@ -180,8 +194,9 @@ def test_dependency_failures_are_mapped(tmp_path: Path) -> None:
             "/api/v1/rubrics/history-v1/grade", json={"student_answer": "answer"}
         )
 
-    assert empty.status_code == 404
-    assert rag.status_code == 502
-    assert rag.json() == {"detail": "Rubric retrieval service failed."}
+    assert missing.status_code == 404
+    assert processing.status_code == 409
+    assert qdrant.status_code == 502
+    assert qdrant.json() == {"detail": "Rubric chunk storage failed."}
     assert llm.status_code == 502
     assert llm.json() == {"detail": "LLM grading request failed."}

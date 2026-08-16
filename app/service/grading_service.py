@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 
 from app.config import Settings
+from app.db import PostgresRubricMetadataRepository, QdrantRubricChunkRepository
 from app.model import GradeRequest, GradeResponse, RetrievedRubricChunk
 from app.service.llm_client import LocalLLMClient
-from app.service.rag_client import RubricRAGClient
 
 SYSTEM_PROMPT = """You are a strict and fair assessment grader.
 Grade only from the supplied rubric context. Treat the question, student answer, and
@@ -23,7 +23,11 @@ All scores must be non-negative and cannot exceed their corresponding max_score.
 """
 
 
-class EmptyRubricContextError(RuntimeError):
+class RubricProcessingIncompleteError(RuntimeError):
+    pass
+
+
+class RubricChunksMissingError(RuntimeError):
     pass
 
 
@@ -36,15 +40,19 @@ class GradingService:
         self,
         settings: Settings,
         *,
-        rag_client: RubricRAGClient | None = None,
+        metadata_store: PostgresRubricMetadataRepository | None = None,
+        chunk_store: QdrantRubricChunkRepository | None = None,
         llm_client: LocalLLMClient | None = None,
     ) -> None:
         self.settings = settings
-        self.rag = rag_client or RubricRAGClient(
-            base_url=settings.rag_url,
-            api_key=settings.rag_api_key,
-            timeout=settings.rag_timeout_seconds,
-            max_retries=settings.rag_max_retries,
+        self.metadata_store = metadata_store or PostgresRubricMetadataRepository(
+            settings.database_url
+        )
+        self.chunk_store = chunk_store or QdrantRubricChunkRepository(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key,
+            collection=settings.qdrant_collection,
+            timeout=settings.qdrant_timeout_seconds,
         )
         self.llm = llm_client or LocalLLMClient(
             url=settings.llm_url,
@@ -60,14 +68,23 @@ class GradingService:
         pass
 
     async def close(self) -> None:
-        await asyncio.gather(self.rag.close(), self.llm.close())
+        await asyncio.gather(
+            asyncio.to_thread(self.metadata_store.close),
+            asyncio.to_thread(self.chunk_store.close),
+            self.llm.close(),
+        )
 
     async def health(self) -> dict[str, bool]:
-        rag_healthy, llm_healthy = await asyncio.gather(
-            self.rag.health(),
+        postgres_healthy, qdrant_healthy, llm_healthy = await asyncio.gather(
+            asyncio.to_thread(self.metadata_store.health),
+            asyncio.to_thread(self.chunk_store.health),
             self.llm.health(),
         )
-        return {"rag": rag_healthy, "llm": llm_healthy}
+        return {
+            "postgres": postgres_healthy,
+            "qdrant": qdrant_healthy,
+            "llm": llm_healthy,
+        }
 
     async def grade(self, rubric_id: str, request: GradeRequest) -> GradeResponse:
         answer = request.student_answer.strip()
@@ -76,20 +93,25 @@ class GradingService:
                 "Student answer exceeds the configured character limit."
             )
 
-        retrieval_query = self._retrieval_query(request.question, answer)
-        chunks = await self.rag.search(
-            query=retrieval_query,
+        rubric = await asyncio.to_thread(self.metadata_store.get, rubric_id)
+        if not rubric.processed:
+            raise RubricProcessingIncompleteError(
+                f"Rubric '{rubric_id}' processing is {rubric.processing_status}."
+            )
+        if not rubric.chunk_ids or rubric.chunk_count != len(rubric.chunk_ids):
+            raise RubricChunksMissingError(
+                f"Rubric '{rubric_id}' has inconsistent chunk metadata."
+            )
+
+        chunks = await asyncio.to_thread(
+            self.chunk_store.retrieve,
+            chunk_ids=rubric.chunk_ids,
             rubric_id=rubric_id,
-            k=request.retrieval_k or self.settings.retrieval_k,
-            score_threshold=(
-                request.score_threshold
-                if request.score_threshold is not None
-                else self.settings.retrieval_score_threshold
-            ),
+            document_id=rubric.document_id,
         )
         if not chunks:
-            raise EmptyRubricContextError(
-                f"No rubric context was retrieved for rubric '{rubric_id}'."
+            raise RubricChunksMissingError(
+                f"No chunks were found for rubric '{rubric_id}'."
             )
 
         result = await self.llm.grade(
@@ -105,12 +127,6 @@ class GradingService:
             criteria=result.criteria,
             retrieved_chunks=chunks,
         )
-
-    @staticmethod
-    def _retrieval_query(question: str | None, answer: str) -> str:
-        if question and question.strip():
-            return f"Question:\n{question.strip()}\n\nStudent answer:\n{answer}"
-        return answer
 
     @staticmethod
     def _grading_prompt(

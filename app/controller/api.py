@@ -4,13 +4,18 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from fastapi.security import APIKeyHeader
 
+from app.db import (
+    MetadataStoreError,
+    QdrantStoreError,
+    RubricMetadataNotFoundError,
+)
 from app.model import GradeRequest, GradeResponse, HealthResponse
 from app.service import (
-    EmptyRubricContextError,
     GradingService,
     LLMResponseError,
     LLMServiceError,
-    RAGServiceError,
+    RubricChunksMissingError,
+    RubricProcessingIncompleteError,
     StudentAnswerTooLargeError,
 )
 
@@ -48,7 +53,8 @@ async def health(service: Annotated[GradingService, Depends(get_service)]) -> He
         )
     return HealthResponse(
         status="ok",
-        rag="ok",
+        postgres="ok",
+        qdrant="ok",
         llm="ok",
         model=service.settings.llm_model,
     )
@@ -75,10 +81,14 @@ async def grade_answer(
         return await service.grade(rubric_id, body)
     except StudentAnswerTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
-    except EmptyRubricContextError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except RAGServiceError as exc:
-        raise HTTPException(status_code=502, detail="Rubric retrieval service failed.") from exc
+    except RubricMetadataNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Rubric not found.") from exc
+    except RubricProcessingIncompleteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (MetadataStoreError, RubricChunksMissingError) as exc:
+        raise HTTPException(status_code=502, detail="Rubric metadata is unavailable.") from exc
+    except QdrantStoreError as exc:
+        raise HTTPException(status_code=502, detail="Rubric chunk storage failed.") from exc
     except LLMResponseError as exc:
         raise HTTPException(status_code=502, detail="LLM returned an invalid grade.") from exc
     except LLMServiceError as exc:

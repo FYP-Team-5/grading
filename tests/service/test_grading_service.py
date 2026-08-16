@@ -3,27 +3,50 @@ import asyncio
 import pytest
 
 from app.config import Settings
-from app.model import CriterionGrade, GradeRequest, GradingResult, RetrievedRubricChunk
+from app.model import (
+    CriterionGrade,
+    GradeRequest,
+    GradingResult,
+    RetrievedRubricChunk,
+    RubricMetadata,
+)
 from app.service import (
-    EmptyRubricContextError,
     GradingService,
+    RubricChunksMissingError,
+    RubricProcessingIncompleteError,
     StudentAnswerTooLargeError,
 )
 
 
-class FakeRAGClient:
-    def __init__(self, chunks) -> None:
-        self.chunks = chunks
-        self.search_call = None
+class FakeMetadataStore:
+    def __init__(self, rubric: RubricMetadata) -> None:
+        self.rubric = rubric
+        self.get_call = None
 
-    async def close(self) -> None:
+    def close(self) -> None:
         pass
 
-    async def health(self) -> bool:
+    def health(self) -> bool:
         return True
 
-    async def search(self, **kwargs):
-        self.search_call = kwargs
+    def get(self, rubric_id: str) -> RubricMetadata:
+        self.get_call = rubric_id
+        return self.rubric
+
+
+class FakeChunkStore:
+    def __init__(self, chunks) -> None:
+        self.chunks = chunks
+        self.retrieve_call = None
+
+    def close(self) -> None:
+        pass
+
+    def health(self) -> bool:
+        return True
+
+    def retrieve(self, **kwargs):
+        self.retrieve_call = kwargs
         return self.chunks
 
 
@@ -54,18 +77,35 @@ class FakeLLMClient:
         )
 
 
-def test_grade_retrieves_only_selected_rubric_and_builds_prompt() -> None:
-    rag = FakeRAGClient(
+def completed_rubric() -> RubricMetadata:
+    return RubricMetadata(
+        id="history-v1",
+        document_id="document-1",
+        processed=True,
+        processing_status="completed",
+        chunk_count=1,
+        chunk_ids=["chunk-1"],
+    )
+
+
+def test_grade_uses_postgres_chunk_ids_and_builds_prompt() -> None:
+    metadata = FakeMetadataStore(completed_rubric())
+    chunks = FakeChunkStore(
         [
             RetrievedRubricChunk(
+                id="chunk-1",
                 content="Evidence: 5 points",
-                similarity_score=0.8,
-                metadata={"rubric_id": "history-v1"},
+                metadata={"rubric_id": "history-v1", "document_id": "document-1"},
             )
         ]
     )
     llm = FakeLLMClient()
-    service = GradingService(Settings(), rag_client=rag, llm_client=llm)
+    service = GradingService(
+        Settings(),
+        metadata_store=metadata,
+        chunk_store=chunks,
+        llm_client=llm,
+    )
 
     response = asyncio.run(
         service.grade(
@@ -73,34 +113,57 @@ def test_grade_retrieves_only_selected_rubric_and_builds_prompt() -> None:
             GradeRequest(
                 question="Explain the cause.",
                 student_answer="Economic pressure was the main cause.",
-                retrieval_k=4,
             ),
         ),
     )
 
-    assert rag.search_call["rubric_id"] == "history-v1"
-    assert rag.search_call["k"] == 4
-    assert "Explain the cause" in rag.search_call["query"]
+    assert metadata.get_call == "history-v1"
+    assert chunks.retrieve_call == {
+        "chunk_ids": ["chunk-1"],
+        "rubric_id": "history-v1",
+        "document_id": "document-1",
+    }
     assert "Evidence: 5 points" in llm.grade_call["user_prompt"]
+    assert "Explain the cause" in llm.grade_call["user_prompt"]
     assert response.percentage == 75
     assert response.rubric_id == "history-v1"
 
 
-def test_grade_stops_when_no_rubric_context_is_found() -> None:
+def test_grade_stops_when_postgres_chunk_metadata_is_empty() -> None:
+    rubric = completed_rubric()
+    rubric.chunk_count = 0
+    rubric.chunk_ids = []
     service = GradingService(
         Settings(),
-        rag_client=FakeRAGClient([]),
+        metadata_store=FakeMetadataStore(rubric),
+        chunk_store=FakeChunkStore([]),
         llm_client=FakeLLMClient(),
     )
 
-    with pytest.raises(EmptyRubricContextError, match="history-v1"):
+    with pytest.raises(RubricChunksMissingError, match="history-v1"):
+        asyncio.run(service.grade("history-v1", GradeRequest(student_answer="answer")))
+
+
+def test_grade_rejects_unprocessed_rubric() -> None:
+    rubric = completed_rubric()
+    rubric.processed = False
+    rubric.processing_status = "processing"
+    service = GradingService(
+        Settings(),
+        metadata_store=FakeMetadataStore(rubric),
+        chunk_store=FakeChunkStore([]),
+        llm_client=FakeLLMClient(),
+    )
+
+    with pytest.raises(RubricProcessingIncompleteError, match="processing"):
         asyncio.run(service.grade("history-v1", GradeRequest(student_answer="answer")))
 
 
 def test_grade_enforces_configured_answer_limit() -> None:
     service = GradingService(
         Settings(max_answer_characters=1000),
-        rag_client=FakeRAGClient([]),
+        metadata_store=FakeMetadataStore(completed_rubric()),
+        chunk_store=FakeChunkStore([]),
         llm_client=FakeLLMClient(),
     )
 

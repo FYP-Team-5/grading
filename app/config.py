@@ -21,12 +21,12 @@ class Settings(BaseSettings):
     api_key: str | None = None
     cors_origins: str = "*"
 
-    rag_url: str = "http://localhost:8000"
-    rag_api_key: str | None = None
-    rag_timeout_seconds: float = Field(default=30, gt=0, le=300)
-    rag_max_retries: int = Field(default=2, ge=0, le=10)
-    retrieval_k: int = Field(default=8, ge=1, le=50)
-    retrieval_score_threshold: float | None = Field(default=None, ge=-1, le=1)
+    database_url: str = "postgresql+psycopg://rag:rag@localhost:5432/rag"
+
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: str | None = None
+    qdrant_collection: str = "rubric_chunks"
+    qdrant_timeout_seconds: float = Field(default=30, gt=0, le=300)
 
     llm_url: str = "http://localhost:11434/v1/chat/completions"
     llm_model: str = "local-model"

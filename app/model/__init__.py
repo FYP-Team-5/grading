@@ -6,6 +6,7 @@ from app.model.grading import (
     RetrievedRubricChunk,
 )
 from app.model.health import HealthResponse
+from app.model.rubric import RubricMetadata
 
 __all__ = [
     "CriterionGrade",
@@ -14,4 +15,5 @@ __all__ = [
     "GradingResult",
     "HealthResponse",
     "RetrievedRubricChunk",
+    "RubricMetadata",
 ]
