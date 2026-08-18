@@ -21,7 +21,8 @@ class Settings(BaseSettings):
     api_key: str | None = None
     cors_origins: str = "*"
 
-    database_url: str = "postgresql+psycopg://rag:rag@localhost:5432/rag"
+    rag_database_url: str = "postgresql+psycopg://rag:rag@localhost:5432/rag"
+    grading_database_url: str = "postgresql+psycopg://rag:rag@localhost:5432/rag"
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None
@@ -42,7 +43,9 @@ class Settings(BaseSettings):
     def allowed_origins(self) -> list[str]:
         if self.cors_origins.strip() == "*":
             return ["*"]
-        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        return [
+            origin.strip() for origin in self.cors_origins.split(",") if origin.strip()
+        ]
 
 
 @lru_cache

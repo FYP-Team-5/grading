@@ -13,8 +13,13 @@ from app.service import GradingService
 OPENAPI_TAGS = [
     {"name": "health", "description": "Storage and LLM dependency readiness status."},
     {
+        "name": "catalog",
+        "description": "Manage courses, exams, questions, and rubric mappings.",
+    },
+    {"name": "attempts", "description": "Create and inspect student attempts."},
+    {
         "name": "grading",
-        "description": "Retrieve rubric context and grade student answers.",
+        "description": "Grade one or more responses within a student attempt.",
     },
 ]
 

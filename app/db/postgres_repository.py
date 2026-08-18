@@ -27,9 +27,13 @@ rubrics = Table(
     metadata,
     Column("id", String(128), primary_key=True),
     Column("document_id", String(36), nullable=False),
+    Column("version", String(64), nullable=False),
+    Column("course_id", String(128), nullable=True),
+    Column("exam_id", String(128), nullable=True),
     Column("processed", Boolean, nullable=False),
     Column("processing_status", String(32), nullable=False),
     Column("processing_error", Text, nullable=True),
+    Column("archived", Boolean, nullable=False),
     Column("chunk_count", Integer, nullable=False),
     Column("chunk_ids", JSON, nullable=False),
 )
@@ -71,7 +75,9 @@ class PostgresRubricMetadataRepository:
             with self.engine.connect() as connection:
                 row = connection.execute(statement).mappings().first()
         except SQLAlchemyError as exc:
-            raise MetadataStoreError("Unable to read rubric metadata from PostgreSQL.") from exc
+            raise MetadataStoreError(
+                "Unable to read rubric metadata from PostgreSQL."
+            ) from exc
         if row is None:
             raise RubricMetadataNotFoundError(rubric_id)
         try:

@@ -1,18 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
-
-
-class GradeRequest(BaseModel):
-    student_answer: str = Field(min_length=1)
-    question: str | None = Field(default=None, max_length=10_000)
-
-    @field_validator("student_answer")
-    @classmethod
-    def answer_must_contain_text(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("student_answer must contain non-whitespace text")
-        return value
+from pydantic import BaseModel, Field, model_validator
 
 
 class RetrievedRubricChunk(BaseModel):
@@ -45,9 +33,3 @@ class GradingResult(BaseModel):
         if self.score > self.max_score:
             raise ValueError("score cannot exceed max_score")
         return self
-
-
-class GradeResponse(GradingResult):
-    rubric_id: str
-    percentage: float = Field(ge=0, le=100)
-    retrieved_chunks: list[RetrievedRubricChunk]

@@ -1,27 +1,33 @@
 import asyncio
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from app.config import Settings
+from app.db import AttemptStateError, PostgresGradingRepository
 from app.model import (
+    CourseCreate,
     CriterionGrade,
-    GradeRequest,
+    ExamCreate,
+    GradeAttemptRequest,
     GradingResult,
+    QuestionCreate,
+    QuestionResponseSubmission,
     RetrievedRubricChunk,
     RubricMetadata,
 )
 from app.service import (
     GradingService,
-    RubricChunksMissingError,
-    RubricProcessingIncompleteError,
-    StudentAnswerTooLargeError,
+    IncompleteAttemptError,
+    LLMScoreScaleError,
+    RubricOwnershipError,
 )
 
 
-class FakeMetadataStore:
+class FakeRubricStore:
     def __init__(self, rubric: RubricMetadata) -> None:
         self.rubric = rubric
-        self.get_call = None
 
     def close(self) -> None:
         pass
@@ -30,14 +36,24 @@ class FakeMetadataStore:
         return True
 
     def get(self, rubric_id: str) -> RubricMetadata:
-        self.get_call = rubric_id
+        assert rubric_id == self.rubric.id
         return self.rubric
 
 
 class FakeChunkStore:
-    def __init__(self, chunks) -> None:
-        self.chunks = chunks
-        self.retrieve_call = None
+    def __init__(self) -> None:
+        self.chunks = [
+            RetrievedRubricChunk(
+                id=f"chunk-{index}",
+                content=f"Criterion for chunk {index}",
+                metadata={
+                    "rubric_id": "history-rubric-v1",
+                    "document_id": "document-1",
+                    "chunk_index": index,
+                },
+            )
+            for index in range(3)
+        ]
 
     def close(self) -> None:
         pass
@@ -46,13 +62,13 @@ class FakeChunkStore:
         return True
 
     def retrieve(self, **kwargs):
-        self.retrieve_call = kwargs
         return self.chunks
 
 
 class FakeLLMClient:
-    def __init__(self) -> None:
-        self.grade_call = None
+    def __init__(self, *, wrong_scale: bool = False) -> None:
+        self.calls = []
+        self.wrong_scale = wrong_scale
 
     async def close(self) -> None:
         pass
@@ -61,113 +77,229 @@ class FakeLLMClient:
         return True
 
     async def grade(self, **kwargs) -> GradingResult:
-        self.grade_call = kwargs
+        self.calls.append(kwargs)
+        expected_max = 10 if 'max_score="10.0"' in kwargs["user_prompt"] else 5
+        returned_max = 100 if self.wrong_scale else expected_max
         return GradingResult(
-            score=7.5,
-            max_score=10,
-            feedback="Use more evidence.",
+            score=returned_max * 0.8,
+            max_score=returned_max,
+            feedback="Relevant answer with room for more evidence.",
             criteria=[
                 CriterionGrade(
-                    criterion="Evidence",
-                    score=3,
-                    max_score=5,
-                    feedback="One relevant example.",
+                    criterion="Accuracy",
+                    score=returned_max * 0.8,
+                    max_score=returned_max,
+                    feedback="Mostly accurate.",
                 )
             ],
         )
 
 
-def completed_rubric() -> RubricMetadata:
+def make_grading_store() -> PostgresGradingRepository:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    repository = PostgresGradingRepository(engine=engine)
+    repository.initialize()
+    return repository
+
+
+def make_rubric() -> RubricMetadata:
     return RubricMetadata(
-        id="history-v1",
+        id="history-rubric-v1",
         document_id="document-1",
+        version="1",
+        course_id="HIST-101",
+        exam_id="history-midterm",
         processed=True,
         processing_status="completed",
-        chunk_count=1,
-        chunk_ids=["chunk-1"],
+        chunk_count=3,
+        chunk_ids=["chunk-0", "chunk-1", "chunk-2"],
     )
 
 
-def test_grade_uses_postgres_chunk_ids_and_builds_prompt() -> None:
-    metadata = FakeMetadataStore(completed_rubric())
-    chunks = FakeChunkStore(
-        [
-            RetrievedRubricChunk(
-                id="chunk-1",
-                content="Evidence: 5 points",
-                metadata={"rubric_id": "history-v1", "document_id": "document-1"},
-            )
-        ]
+def exam_request(max_attempts: int = 2) -> ExamCreate:
+    return ExamCreate(
+        id="history-midterm",
+        title="History midterm",
+        max_attempts=max_attempts,
+        rubric_id="history-rubric-v1",
+        questions=[
+            QuestionCreate(
+                id="history-midterm-q1",
+                prompt="Explain the cause.",
+                max_score=10,
+                rubric_chunk_indexes=[0, 1],
+            ),
+            QuestionCreate(
+                id="history-midterm-q2",
+                prompt="Evaluate the evidence.",
+                max_score=5,
+                rubric_chunk_indexes=[2],
+            ),
+        ],
     )
-    llm = FakeLLMClient()
+
+
+def make_service(*, wrong_scale: bool = False):
+    grading_store = make_grading_store()
+    llm = FakeLLMClient(wrong_scale=wrong_scale)
     service = GradingService(
         Settings(),
-        metadata_store=metadata,
-        chunk_store=chunks,
+        rubric_store=FakeRubricStore(make_rubric()),
+        grading_store=grading_store,
+        chunk_store=FakeChunkStore(),
         llm_client=llm,
     )
+    asyncio.run(service.create_course(CourseCreate(id="HIST-101", title="History")))
+    asyncio.run(service.create_exam("HIST-101", exam_request()))
+    return service, grading_store, llm
+
+
+def test_multi_question_attempt_is_graded_and_persisted() -> None:
+    service, grading_store, llm = make_service()
+    attempt = asyncio.run(service.create_attempt("history-midterm", "student-1"))
 
     response = asyncio.run(
-        service.grade(
-            "history-v1",
-            GradeRequest(
-                question="Explain the cause.",
-                student_answer="Economic pressure was the main cause.",
+        service.grade_attempt(
+            "history-midterm",
+            attempt.id,
+            "student-1",
+            GradeAttemptRequest(
+                responses=[
+                    QuestionResponseSubmission(
+                        question_id="history-midterm-q1",
+                        answer="Economic pressure was the main cause.",
+                    ),
+                    QuestionResponseSubmission(
+                        question_id="history-midterm-q2",
+                        answer="The source supports the conclusion.",
+                    ),
+                ]
             ),
-        ),
-    )
-
-    assert metadata.get_call == "history-v1"
-    assert chunks.retrieve_call == {
-        "chunk_ids": ["chunk-1"],
-        "rubric_id": "history-v1",
-        "document_id": "document-1",
-    }
-    assert "Evidence: 5 points" in llm.grade_call["user_prompt"]
-    assert "Explain the cause" in llm.grade_call["user_prompt"]
-    assert response.percentage == 75
-    assert response.rubric_id == "history-v1"
-
-
-def test_grade_stops_when_postgres_chunk_metadata_is_empty() -> None:
-    rubric = completed_rubric()
-    rubric.chunk_count = 0
-    rubric.chunk_ids = []
-    service = GradingService(
-        Settings(),
-        metadata_store=FakeMetadataStore(rubric),
-        chunk_store=FakeChunkStore([]),
-        llm_client=FakeLLMClient(),
-    )
-
-    with pytest.raises(RubricChunksMissingError, match="history-v1"):
-        asyncio.run(service.grade("history-v1", GradeRequest(student_answer="answer")))
-
-
-def test_grade_rejects_unprocessed_rubric() -> None:
-    rubric = completed_rubric()
-    rubric.processed = False
-    rubric.processing_status = "processing"
-    service = GradingService(
-        Settings(),
-        metadata_store=FakeMetadataStore(rubric),
-        chunk_store=FakeChunkStore([]),
-        llm_client=FakeLLMClient(),
-    )
-
-    with pytest.raises(RubricProcessingIncompleteError, match="processing"):
-        asyncio.run(service.grade("history-v1", GradeRequest(student_answer="answer")))
-
-
-def test_grade_enforces_configured_answer_limit() -> None:
-    service = GradingService(
-        Settings(max_answer_characters=1000),
-        metadata_store=FakeMetadataStore(completed_rubric()),
-        chunk_store=FakeChunkStore([]),
-        llm_client=FakeLLMClient(),
-    )
-
-    with pytest.raises(StudentAnswerTooLargeError):
-        asyncio.run(
-            service.grade("history-v1", GradeRequest(student_answer="x" * 1001))
         )
+    )
+
+    assert response.attempt.status == "graded"
+    assert response.total_score == 12
+    assert response.max_score == 15
+    assert response.percentage == 80
+    assert response.completed_questions == 2
+    assert response.grades[0].rubric_chunk_ids == ["chunk-0", "chunk-1"]
+    assert len(llm.calls) == 2
+    assert len(grading_store.list_grades(attempt.id)) == 2
+
+
+def test_single_question_calls_can_share_one_attempt_before_finalization() -> None:
+    service, _, _ = make_service()
+    attempt = asyncio.run(service.create_attempt("history-midterm", "student-1"))
+
+    partial = asyncio.run(
+        service.grade_attempt(
+            "history-midterm",
+            attempt.id,
+            "student-1",
+            GradeAttemptRequest(
+                responses=[
+                    QuestionResponseSubmission(
+                        question_id="history-midterm-q1",
+                        answer="First response.",
+                    )
+                ],
+                finalize=False,
+            ),
+        )
+    )
+    final = asyncio.run(
+        service.grade_attempt(
+            "history-midterm",
+            attempt.id,
+            "student-1",
+            GradeAttemptRequest(
+                responses=[
+                    QuestionResponseSubmission(
+                        question_id="history-midterm-q2",
+                        answer="Second response.",
+                    )
+                ],
+                finalize=True,
+            ),
+        )
+    )
+
+    assert partial.attempt.status == "in_progress"
+    assert partial.completed_questions == 1
+    assert final.attempt.status == "graded"
+    assert final.completed_questions == 2
+
+
+def test_attempt_cannot_finalize_with_missing_questions() -> None:
+    service, _, _ = make_service()
+    attempt = asyncio.run(service.create_attempt("history-midterm", "student-1"))
+
+    with pytest.raises(IncompleteAttemptError, match="history-midterm-q2"):
+        asyncio.run(
+            service.grade_attempt(
+                "history-midterm",
+                attempt.id,
+                "student-1",
+                GradeAttemptRequest(
+                    responses=[
+                        QuestionResponseSubmission(
+                            question_id="history-midterm-q1",
+                            answer="Only one response.",
+                        )
+                    ],
+                    finalize=True,
+                ),
+            )
+        )
+
+
+def test_attempt_ownership_is_enforced() -> None:
+    service, _, _ = make_service()
+    attempt = asyncio.run(service.create_attempt("history-midterm", "student-1"))
+
+    with pytest.raises(AttemptStateError, match="does not belong"):
+        asyncio.run(
+            service.get_attempt_result(
+                "history-midterm",
+                attempt.id,
+                "student-2",
+            )
+        )
+
+
+def test_exam_and_rubric_ownership_must_match() -> None:
+    service, _, _ = make_service()
+    service.rubric_store.rubric.exam_id = "another-exam"
+
+    with pytest.raises(RubricOwnershipError, match="does not match"):
+        asyncio.run(service.create_attempt("history-midterm", "student-1"))
+
+
+def test_llm_cannot_change_question_score_scale() -> None:
+    service, grading_store, _ = make_service(wrong_scale=True)
+    attempt = asyncio.run(service.create_attempt("history-midterm", "student-1"))
+
+    with pytest.raises(LLMScoreScaleError, match="requires 10"):
+        asyncio.run(
+            service.grade_attempt(
+                "history-midterm",
+                attempt.id,
+                "student-1",
+                GradeAttemptRequest(
+                    responses=[
+                        QuestionResponseSubmission(
+                            question_id="history-midterm-q1",
+                            answer="Response.",
+                        )
+                    ],
+                    finalize=False,
+                ),
+            )
+        )
+
+    assert grading_store.get_attempt(attempt.id).status == "failed"

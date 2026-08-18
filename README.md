@@ -1,164 +1,314 @@
 # Student answer grading service
 
-A self-hosted FastAPI microservice that reads rubric metadata from the PostgreSQL
-database owned by the RAG service, retrieves that rubric's chunks directly from the
-shared Qdrant collection, and sends them with a student answer to an external local
-LLM.
+A stateful FastAPI service for grading one or more answers from an exam or quiz
+attempt. The frontend identifies the exam and attempt; the service reads the exact
+rubric metadata from the RAG service's PostgreSQL database, retrieves the referenced
+chunks directly from the shared Qdrant collection, and asks an OpenAI-compatible
+local LLM to grade each answer.
+
+The service persists courses, exams, questions, attempt limits, student answers, AI
+scores, feedback, and grading evidence. It never creates embeddings and does not call
+the RAG HTTP search endpoint.
 
 ```text
-Frontend --answer + rubric ID--> Grading API
-                                      |
-                                      +--rubric metadata--> PostgreSQL
-                                      |
-                                      +--chunk IDs--------> Qdrant
-                                      |
-                                      +--chunks + answer--> Local LLM
-                                      |
-Frontend <----score + feedback + retrieved evidence
+Instructor -> Grading API -> courses / exams / questions ----+
+Instructor -> RAG API -----> versioned rubric -> Postgres    |
+                                      chunks -> Qdrant        |
+Instructor -> Grading API -> question-to-chunk mappings      |
+                                                             v
+Frontend -> create attempt -> submit answer(s) -> Grading API
+                                                   |  |  |
+                          rubric metadata ----------+  |  +-> grading Postgres
+                          exact Qdrant chunks ----------+      answers + feedback
+                                                   |
+                                                   +-------> local LLM
 ```
 
-The RAG service remains the only writer and continues to own uploads, processing,
-embeddings, and storage schema. The grading service is read-only. It resolves the
-requested rubric in PostgreSQL, verifies processing is complete, loads its ordered
-`chunk_ids`, and retrieves those exact Qdrant payloads without creating a query
-embedding. Each payload's `rubric_id` and `document_id` are checked against the
-PostgreSQL record before the text enters the grading prompt.
+## Ownership and data model
 
-## API contract
+The RAG service owns the `rubrics` table, original documents, and Qdrant points. The
+grading service only reads those records. It creates separate `grading_*` tables for
+its own data; both database URLs point to the same PostgreSQL database in the Docker
+Compose setup.
 
-Submit the student answer to the rubric-scoped endpoint:
-
-```bash
-curl -X POST http://localhost:8001/api/v1/rubrics/history-short-answer-v1/grade \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "question": "Why did the event occur?",
-    "student_answer": "The event occurred because ..."
-  }'
-```
-
-`question` is optional. The service retrieves all chunks recorded for the rubric so
-that every grading criterion is available to the LLM.
-
-Example response:
-
-```json
-{
-  "rubric_id": "history-short-answer-v1",
-  "score": 8,
-  "max_score": 10,
-  "percentage": 80,
-  "feedback": "Accurate explanation; add direct supporting evidence.",
-  "criteria": [
-    {
-      "criterion": "Factual accuracy",
-      "score": 4,
-      "max_score": 5,
-      "feedback": "The central claim is accurate."
-    }
-  ],
-  "retrieved_chunks": [
-    {
-      "id": "442715d6-f5e2-4d1c-a78e-950ced8cd2c7",
-      "content": "5 points: The response is factually accurate...",
-      "metadata": {
-        "rubric_id": "history-short-answer-v1",
-        "chunk_index": 2
-      }
-    }
-  ]
-}
-```
-
-The retrieved chunks are returned as grading evidence. The service validates that
-the LLM returns JSON, positive maximum scores, and scores that do not exceed their
-maximums.
-
-## Dependencies
-
-The RAG Compose project must be running because this container joins its
-`rubric-rag_default` network and connects to the `postgres` and `qdrant` services by
-name. The selected rubric must already be processed. See `../rag/README.md` for
-rubric upload and processing instructions.
-
-The LLM must expose an OpenAI-compatible chat completions endpoint:
-
-```http
-POST /v1/chat/completions
-Content-Type: application/json
-
-{
-  "model": "local-model",
-  "messages": [
-    {"role": "system", "content": "..."},
-    {"role": "user", "content": "..."}
-  ],
-  "temperature": 0,
-  "max_tokens": 2000,
-  "response_format": {"type": "json_object"}
-}
-```
-
-It must return `choices[0].message.content` as a JSON object containing `score`,
-`max_score`, `feedback`, and `criteria`. The default port (`11434`) is suitable for
-an OpenAI-compatible server exposed there; change `LLM_URL` and `LLM_MODEL` for the
-local runtime being used.
+| Record | Relationship and behavior |
+|---|---|
+| Course | Has many exams and quizzes |
+| Exam/quiz | Belongs to one course, has many questions, an attempt limit, and one active `rubric_id` |
+| Question | Belongs to one exam and maps to one or more rubric `chunk_index` values |
+| Attempt | Belongs to one student and exam and records the rubric ID/version used when it began |
+| Response | Stores one student's answer for one question in an attempt |
+| Question grade | Stores score, feedback, criteria, rubric/chunk IDs, LLM model, and prompt version |
 
 ## Run with Docker
 
-Start the RAG service first, then configure and start this repository:
+Start the RAG project first because it provides PostgreSQL, Qdrant, and the external
+Docker network:
 
 ```bash
+cd ../rag
+docker compose up --build -d
+
+cd ../grading
 cp .env.example .env
-# Set LLM_MODEL in .env to a model available from the local LLM server.
+# Set LLM_MODEL to a model served by your local OpenAI-compatible endpoint.
 docker compose up --build -d
 docker compose ps
 ```
 
-The container joins the existing `rubric-rag_default` Docker network for PostgreSQL
-and Qdrant. It reaches the local LLM on the workstation through
-`host.docker.internal`. Defaults are:
+Defaults:
 
-- Grading Swagger UI: <http://localhost:8001/docs>
-- Grading health: <http://localhost:8001/health>
-- PostgreSQL: `postgres:5432/rag`
-- Qdrant: `http://qdrant:6333`, collection `rubric_chunks`
-- Local LLM: <http://host.docker.internal:11434/v1/chat/completions>
+- API and Swagger UI: <http://localhost:8001/docs>
+- Health: <http://localhost:8001/health>
+- Shared PostgreSQL: `postgres:5432/rag`
+- Shared Qdrant collection: `qdrant:6333/rubric_chunks`
+- Local LLM: `http://host.docker.internal:11434/v1/chat/completions`
 
-Health returns `503` unless PostgreSQL, the configured Qdrant collection, and the
-LLM models endpoint are reachable. If `API_KEY` is configured, frontend grading
-calls must include it in the `X-API-Key` header; `/health` remains unauthenticated.
-`LLM_API_KEY`, when set, is sent as a Bearer token.
+The grading container joins `rubric-rag_default`. If the RAG Compose project or
+network has another name, update `networks.rag_network.name` in `compose.yaml`.
 
-## Run without Docker
+## Complete user flows
 
-When the grading process runs directly on the workstation, use localhost URLs:
+These examples assume no `API_KEY`. When one is configured, include
+`-H 'X-API-Key: <key>'` on every `/api/v1` request.
+
+### 1. Instructor creates or lists courses
+
+```bash
+curl -X POST http://localhost:8001/api/v1/courses \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"HIST-101","title":"World History"}'
+
+curl http://localhost:8001/api/v1/courses
+```
+
+### 2. Instructor creates and inspects an exam or quiz
+
+Create the exam and its questions. `rubric_id` must match the rubric that will be
+uploaded to RAG. Leave `rubric_chunk_indexes` empty until processing reveals the
+chunk indexes.
+
+```bash
+curl -X POST http://localhost:8001/api/v1/courses/HIST-101/exams \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "id":"history-midterm",
+    "title":"History midterm",
+    "type":"exam",
+    "max_attempts":2,
+    "rubric_id":"history-midterm-rubric-v1",
+    "questions":[
+      {"id":"history-midterm-q1","prompt":"Explain the primary cause.","max_score":10},
+      {"id":"history-midterm-q2","prompt":"Evaluate the evidence.","max_score":5}
+    ]
+  }'
+
+curl http://localhost:8001/api/v1/courses/HIST-101/exams
+curl http://localhost:8001/api/v1/exams/history-midterm
+```
+
+Use `type: "quiz"` for a quiz. `max_attempts: 1` permits one attempt per student;
+higher values permit that many attempts per student for this exam.
+
+### 3. Instructor uploads and waits for the rubric
+
+Upload through the RAG API with the exact same course and exam IDs:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/rubrics \
+  -F 'file=@./history-midterm-rubric.pdf' \
+  -F 'rubric_id=history-midterm-rubric-v1' \
+  -F 'version=1' \
+  -F 'course_id=HIST-101' \
+  -F 'exam_id=history-midterm'
+
+curl http://localhost:8000/api/v1/rubrics/history-midterm-rubric-v1/status
+```
+
+Do not create attempts until the status is `completed`. The grading service rejects
+missing, failed, processing, archived, or course/exam-mismatched active rubrics.
+
+### 4. Instructor maps questions to rubric chunks
+
+Inspect processed chunks and their zero-based `chunk_index` values:
+
+```bash
+curl http://localhost:8000/api/v1/rubrics/history-midterm-rubric-v1/chunks
+```
+
+Map each question to all chunks containing its relevant grading criteria:
+
+```bash
+curl -X PUT \
+  http://localhost:8001/api/v1/exams/history-midterm/questions/history-midterm-q1/rubric-chunks \
+  -H 'Content-Type: application/json' \
+  -d '{"chunk_indexes":[0,1]}'
+
+curl -X PUT \
+  http://localhost:8001/api/v1/exams/history-midterm/questions/history-midterm-q2/rubric-chunks \
+  -H 'Content-Type: application/json' \
+  -d '{"chunk_indexes":[2]}'
+```
+
+The API verifies that every supplied index exists. Every question must have a
+non-empty, valid mapping before an attempt can be created.
+
+### 5. Instructor activates a new rubric version
+
+Upload a new RAG record with a new `rubric_id` and version but the same `course_id`
+and `exam_id`. After processing completes, activate it:
+
+```bash
+curl -X PUT http://localhost:8001/api/v1/exams/history-midterm/rubric \
+  -H 'Content-Type: application/json' \
+  -d '{"rubric_id":"history-midterm-rubric-v2"}'
+```
+
+Review and update question mappings because chunk indexes can change. See
+[Limitations](#limitations) before changing a rubric while attempts are in progress.
+
+### 6. Student starts an attempt
+
+```bash
+curl -X POST http://localhost:8001/api/v1/exams/history-midterm/attempts \
+  -H 'X-Student-ID: student-42'
+```
+
+Save the returned attempt `id`. Creating it consumes one of this student's allowed
+attempts. The API returns `409 Conflict` once the configured limit is reached.
+
+`X-Student-ID` is an identity handoff, not authentication by itself. In production,
+a trusted authentication gateway must derive this value from the authenticated user
+and replace any client-supplied header.
+
+### 7. Student lists their attempts
+
+```bash
+curl http://localhost:8001/api/v1/exams/history-midterm/attempts \
+  -H 'X-Student-ID: student-42'
+```
+
+Only attempts for that student and exam are returned.
+
+### 8. Student submits one question at a time
+
+Use `finalize: false` while more questions remain:
+
+```bash
+curl -X POST \
+  http://localhost:8001/api/v1/exams/history-midterm/attempts/<attempt-id>/grade \
+  -H 'X-Student-ID: student-42' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "responses":[
+      {"question_id":"history-midterm-q1","answer":"Economic pressure was ..."}
+    ],
+    "finalize":false
+  }'
+```
+
+The response and AI grade are saved immediately; the attempt remains `in_progress`.
+A later call can submit another question. Resubmitting a question before finalization
+updates its saved answer and grade.
+
+### 9. Student submits multiple questions and finalizes
+
+A request can contain several unique question IDs. Set `finalize: true` only when
+this request plus earlier submissions covers every question:
+
+```bash
+curl -X POST \
+  http://localhost:8001/api/v1/exams/history-midterm/attempts/<attempt-id>/grade \
+  -H 'X-Student-ID: student-42' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "responses":[
+      {"question_id":"history-midterm-q1","answer":"Economic pressure was ..."},
+      {"question_id":"history-midterm-q2","answer":"The source demonstrates ..."}
+    ],
+    "finalize":true
+  }'
+```
+
+Finalization returns `409` while a question is ungraded. A finalized attempt is
+immutable. The result contains per-question scores, criteria, feedback, Qdrant chunk
+IDs, and aggregate totals. If the LLM or response validation fails, the attempt is
+marked `failed`; the same unfinalized attempt may be retried.
+
+### 10. Student retrieves saved feedback
+
+```bash
+curl \
+  http://localhost:8001/api/v1/exams/history-midterm/attempts/<attempt-id> \
+  -H 'X-Student-ID: student-42'
+```
+
+The service checks that the attempt belongs to the supplied student and exam. Stored
+scores and feedback are returned without calling the LLM again.
+
+## API summary
+
+| Method | Path | User action |
+|---|---|---|
+| `GET` | `/health` | Check PostgreSQL, Qdrant, and LLM readiness |
+| `POST` / `GET` | `/api/v1/courses` | Create or list courses |
+| `POST` / `GET` | `/api/v1/courses/{course_id}/exams` | Create or list exams/quizzes |
+| `GET` | `/api/v1/exams/{exam_id}` | Inspect an exam and its questions |
+| `PUT` | `/api/v1/exams/{exam_id}/rubric` | Activate a processed rubric version |
+| `PUT` | `/api/v1/exams/{exam_id}/questions/{question_id}/rubric-chunks` | Map a question to chunks |
+| `POST` / `GET` | `/api/v1/exams/{exam_id}/attempts` | Create or list a student's attempts |
+| `POST` | `/api/v1/exams/{exam_id}/attempts/{attempt_id}/grade` | Save and grade one/many answers |
+| `GET` | `/api/v1/exams/{exam_id}/attempts/{attempt_id}` | Retrieve saved result and feedback |
+
+## Local LLM contract
+
+The endpoint must support OpenAI-style `POST /v1/chat/completions` and
+`GET /v1/models`. The chat response's `choices[0].message.content` must be a JSON
+object containing `score`, `max_score`, `feedback`, and `criteria`. The service
+rejects out-of-range scores and any LLM `max_score` that differs from the question's
+configured maximum. Temperature defaults to zero.
+
+## Limitations
+
+- Question IDs are currently the primary key of `grading_questions`, so they must be
+  unique across the whole grading service, not only within one exam. Use namespaced
+  IDs such as `history-midterm-q1` rather than reusing `q1`.
+- An attempt records its rubric ID and version, but does not snapshot the question
+  prompt, maximum score, or chunk-index mapping. Grading reads those fields from the
+  current exam record. Do not activate/remap a new rubric or otherwise change exam
+  question configuration while any attempt for that exam is still in progress.
+- Catalog creation and mapping endpoints are protected only by the optional shared
+  `X-API-Key`; production deployments should put role-aware authorization in front
+  of the service.
+- Grading multiple answers invokes the LLM sequentially. A failure can leave earlier
+  answers from that request saved while the attempt is marked `failed`.
+
+## Configuration and non-Docker use
+
+See `.env.example`. For a process running directly on the workstation:
 
 ```dotenv
-DATABASE_URL=postgresql+psycopg://rag:rag@localhost:5432/rag
+RAG_DATABASE_URL=postgresql+psycopg://rag:rag@localhost:5432/rag
+GRADING_DATABASE_URL=postgresql+psycopg://rag:rag@localhost:5432/rag
 QDRANT_URL=http://localhost:6333
 QDRANT_COLLECTION=rubric_chunks
 LLM_URL=http://localhost:11434/v1/chat/completions
 LLM_MODEL=your-local-model
 ```
 
-Then:
-
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8001
 ```
 
-## Configuration
+`RAG_DATABASE_URL` needs read access to the RAG-owned `rubrics` table.
+`GRADING_DATABASE_URL` needs create/update access to the `grading_*` tables. For
+production, use least-privilege database users, TLS, restricted CORS, and a non-empty
+`API_KEY`.
 
-All settings are environment variables; see `.env.example`. The most important are
-`DATABASE_URL`, `QDRANT_URL`, `QDRANT_COLLECTION`, `QDRANT_API_KEY`, `LLM_URL`,
-`LLM_MODEL`, `LLM_API_KEY`, timeout settings, CORS origins, and the optional inbound
-`API_KEY`. Database credentials and the collection name must match the RAG service.
-
-## Develop, lint, and test
+## Develop, test, and release
 
 ```bash
 python -m venv .venv
@@ -166,26 +316,17 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python -m pip install ruff==0.16.3
-make test
-make lint
-# Or run both:
 make ci
 ```
 
-Tests use SQLite, fake Qdrant clients, and in-memory HTTP transports; they do not
-require running storage or LLM services.
+Tests use SQLite, fake Qdrant clients, and in-memory HTTP transports; no live LLM or
+storage service is required.
 
-The [GitHub Actions workflow](.github/workflows/ci.yml) runs on every pull request
-and every push outside `main`. Its lint and test jobs run independently on Python 3.12,
-matching the Docker image. Dependencies are installed directly in the workflow from
-`requirements.txt`; there is no separate CI requirements file. The lint job runs
-`python -m ruff check app tests`, and the test job runs `python -m pytest -q`.
+The pull-request [CI workflow](.github/workflows/ci.yml) installs dependencies in
+the YAML, then runs Ruff and pytest. Configure its lint and test jobs as required
+branch-protection checks to prevent a failing PR from being merged. GitHub cannot
+undo a merge after it has occurred.
 
-The [post-merge workflow](.github/workflows/post-merge.yml) runs for each push to
-`main`, including merged pull requests. It reruns lint and tests, then creates a tag
-only when both pass. Tags start at `v0.1` and increment the minor component (`v0.2`,
-`v0.3`, and so on). A rerun for an already-tagged commit reuses its tag.
-
-The post-merge workflow also contains a fully commented `build-and-push` job for
-publishing the versioned image and `latest` to GitHub Container Registry. Uncomment
-that job when image publishing is wanted; it requires `packages: write` permission.
+The [post-merge workflow](.github/workflows/post-merge.yml) reruns both checks on
+each push to `main`. Only a successful run creates the next tag, beginning with
+`v0.1`. Its GHCR Docker build/publish job is present but fully commented out.
