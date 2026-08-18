@@ -7,13 +7,14 @@ chunks directly from the shared Qdrant collection, and asks an OpenAI-compatible
 local LLM to grade each answer.
 
 The service persists courses, exams, questions, attempt limits, student answers, AI
-scores, feedback, and grading evidence. It never creates embeddings and does not call
-the RAG HTTP search endpoint.
+scores, feedback, and grading evidence. It never creates embeddings, never calls the
+embedding model container, and does not call the RAG HTTP search endpoint. RAG has
+already embedded and stored the rubric before grading begins.
 
 ```text
 Instructor -> Grading API -> courses / exams / questions ----+
-Instructor -> RAG API -----> versioned rubric -> Postgres    |
-                                      chunks -> Qdrant        |
+Instructor -> RAG API -> embedding model -> vectors -> Qdrant|
+                         versioned rubric metadata -> Postgres|
 Instructor -> Grading API -> question-to-chunk mappings      |
                                                              v
 Frontend -> create attempt -> submit answer(s) -> Grading API
@@ -66,6 +67,16 @@ Defaults:
 
 The grading container joins `rubric-rag_default`. If the RAG Compose project or
 network has another name, update `networks.rag_network.name` in `compose.yaml`.
+
+There are two distinct model dependencies:
+
+- The embedding model container is called directly by RAG during rubric processing
+  and semantic search. Grading never contacts it.
+- The grading LLM is called by this service for each submitted answer and must expose
+  the configured OpenAI-compatible chat-completions endpoint.
+
+Once a rubric is processed, grading retrieves its exact stored Qdrant points by ID;
+it does not perform semantic search or generate a query embedding.
 
 ## Complete user flows
 
@@ -125,8 +136,10 @@ curl -X POST http://localhost:8000/api/v1/rubrics \
 curl http://localhost:8000/api/v1/rubrics/history-midterm-rubric-v1/status
 ```
 
-Do not create attempts until the status is `completed`. The grading service rejects
-missing, failed, processing, archived, or course/exam-mismatched active rubrics.
+After upload, RAG chunks the document, sends text batches directly to its external
+embedding model container, validates the vectors, and upserts them to Qdrant. Do not
+create attempts until the status is `completed`. The grading service rejects missing,
+failed, processing, archived, or course/exam-mismatched active rubrics.
 
 ### 4. Instructor maps questions to rubric chunks
 
@@ -260,9 +273,10 @@ scores and feedback are returned without calling the LLM again.
 | `POST` | `/api/v1/exams/{exam_id}/attempts/{attempt_id}/grade` | Save and grade one/many answers |
 | `GET` | `/api/v1/exams/{exam_id}/attempts/{attempt_id}` | Retrieve saved result and feedback |
 
-## Local LLM contract
+## Local grading LLM contract
 
-The endpoint must support OpenAI-style `POST /v1/chat/completions` and
+This is the grading model, not RAG's embedding model. The endpoint must support
+OpenAI-style `POST /v1/chat/completions` and
 `GET /v1/models`. The chat response's `choices[0].message.content` must be a JSON
 object containing `score`, `max_score`, `feedback`, and `criteria`. The service
 rejects out-of-range scores and any LLM `max_score` that differs from the question's
