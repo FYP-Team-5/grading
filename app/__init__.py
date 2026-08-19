@@ -1,0 +1,1 @@
+"""Rubric-based grading service."""
