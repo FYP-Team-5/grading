@@ -26,9 +26,9 @@ from app.dto import (
 )
 from app.model import Attempt, Course, Exam, Question
 from app.service import (
-    GradingService,
     AttemptService,
     CatalogService,
+    GradingService,
     IncompleteAttemptError,
     LLMResponseError,
     LLMScoreScaleError,

@@ -1,5 +1,7 @@
 from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator, model_validator
+
 from app.model.assessment import Attempt, QuestionGrade
 
 ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"

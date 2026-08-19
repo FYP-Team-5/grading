@@ -1,5 +1,7 @@
 from typing import Any
+
 from pydantic import BaseModel, Field, model_validator
+
 
 class RetrievedRubricChunk(BaseModel):
     id: str

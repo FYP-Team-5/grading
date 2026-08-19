@@ -5,8 +5,8 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.db import AttemptLimitExceededError
-from app.main import create_app
 from app.dto import AttemptGradeResponse
+from app.main import create_app
 from app.model import (
     Attempt,
     Course,
