@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import create_engine
 
 from app.db import AttemptLimitExceededError, PostgresGradingRepository
-from app.model import ExamCreate, QuestionCreate
+from app.dto import ExamCreate, QuestionCreate
 
 
 def make_repository() -> PostgresGradingRepository:

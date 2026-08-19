@@ -24,7 +24,8 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from app.model import Attempt, Course, Exam, ExamCreate, Question, QuestionGrade
+from app.dto import ExamCreate
+from app.model import Attempt, Course, Exam, Question, QuestionGrade
 
 grading_metadata = MetaData()
 

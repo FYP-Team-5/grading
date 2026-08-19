@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.config import Settings
 from app.db import AttemptStateError, PostgresGradingRepository
-from app.model import (
+from app.dto import (
     CourseCreate,
     CriterionGrade,
     ExamCreate,
@@ -15,8 +15,8 @@ from app.model import (
     QuestionCreate,
     QuestionResponseSubmission,
     RetrievedRubricChunk,
-    RubricMetadata,
 )
+from app.model import RubricMetadata
 from app.service import (
     GradingService,
     IncompleteAttemptError,

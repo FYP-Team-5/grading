@@ -15,21 +15,20 @@ from app.db import (
     QdrantStoreError,
     RubricMetadataNotFoundError,
 )
-from app.model import (
-    Attempt,
+from app.dto import (
     AttemptGradeResponse,
-    Course,
     CourseCreate,
-    Exam,
     ExamCreate,
     ExamRubricUpdate,
     GradeAttemptRequest,
     HealthResponse,
-    Question,
     RubricChunkMappingRequest,
 )
+from app.model import Attempt, Course, Exam, Question
 from app.service import (
     GradingService,
+    AttemptService,
+    CatalogService,
     IncompleteAttemptError,
     LLMResponseError,
     LLMScoreScaleError,
@@ -46,6 +45,12 @@ ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 def get_service(request: Request) -> GradingService:
     return request.app.state.grading_service
+
+def get_catalog_service(request: Request) -> CatalogService:
+    return request.app.state.catalog_service
+
+def get_attempt_service(request: Request) -> AttemptService:
+    return request.app.state.attempt_service
 
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -73,7 +78,8 @@ async def require_student_id(
 
 
 health_router = APIRouter(tags=["health"])
-router = APIRouter(dependencies=[Depends(require_api_key)])
+courses_router = APIRouter(prefix="/courses", tags=["catalog"], dependencies=[Depends(require_api_key)])
+exams_router = APIRouter(prefix="/exams", tags=["catalog"], dependencies=[Depends(require_api_key)])
 
 
 @health_router.get("/health", response_model=HealthResponse)
@@ -98,10 +104,10 @@ async def health(
     )
 
 
-@router.post("/courses", response_model=Course, status_code=201, tags=["catalog"])
+@courses_router.post("", response_model=Course, status_code=201)
 async def create_course(
     body: CourseCreate,
-    service: Annotated[GradingService, Depends(get_service)],
+    service: Annotated[CatalogService, Depends(get_catalog_service)],
 ) -> Course:
     try:
         return await service.create_course(body)
@@ -111,23 +117,22 @@ async def create_course(
         raise HTTPException(status_code=502, detail="Grading database failed.") from exc
 
 
-@router.get("/courses", response_model=list[Course], tags=["catalog"])
+@courses_router.get("", response_model=list[Course])
 async def list_courses(
-    service: Annotated[GradingService, Depends(get_service)],
+    service: Annotated[CatalogService, Depends(get_catalog_service)],
 ) -> list[Course]:
     return await service.list_courses()
 
 
-@router.post(
-    "/courses/{course_id}/exams",
+@courses_router.post(
+    "/{course_id}/exams",
     response_model=Exam,
     status_code=201,
-    tags=["catalog"],
 )
 async def create_exam(
     course_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     body: ExamCreate,
-    service: Annotated[GradingService, Depends(get_service)],
+    service: Annotated[CatalogService, Depends(get_catalog_service)],
 ) -> Exam:
     try:
         return await service.create_exam(course_id, body)
@@ -139,14 +144,13 @@ async def create_exam(
         raise HTTPException(status_code=502, detail="Grading database failed.") from exc
 
 
-@router.get(
-    "/courses/{course_id}/exams",
+@courses_router.get(
+    "/{course_id}/exams",
     response_model=list[Exam],
-    tags=["catalog"],
 )
 async def list_exams(
     course_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
-    service: Annotated[GradingService, Depends(get_service)],
+    service: Annotated[CatalogService, Depends(get_catalog_service)],
 ) -> list[Exam]:
     try:
         return await service.list_exams(course_id)
@@ -154,10 +158,10 @@ async def list_exams(
         raise HTTPException(status_code=404, detail="Course not found.") from exc
 
 
-@router.get("/exams/{exam_id}", response_model=Exam, tags=["catalog"])
+@exams_router.get("/{exam_id}", response_model=Exam)
 async def get_exam(
     exam_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
-    service: Annotated[GradingService, Depends(get_service)],
+    service: Annotated[CatalogService, Depends(get_catalog_service)],
 ) -> Exam:
     try:
         return await service.get_exam(exam_id)
@@ -165,11 +169,11 @@ async def get_exam(
         raise HTTPException(status_code=404, detail="Exam not found.") from exc
 
 
-@router.put("/exams/{exam_id}/rubric", response_model=Exam, tags=["catalog"])
+@exams_router.put("/{exam_id}/rubric", response_model=Exam)
 async def update_exam_rubric(
     exam_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     body: ExamRubricUpdate,
-    service: Annotated[GradingService, Depends(get_service)],
+    service: Annotated[CatalogService, Depends(get_catalog_service)],
 ) -> Exam:
     try:
         return await service.update_exam_rubric(exam_id, body)
@@ -187,16 +191,15 @@ async def update_exam_rubric(
         raise HTTPException(status_code=502, detail="Grading database failed.") from exc
 
 
-@router.put(
-    "/exams/{exam_id}/questions/{question_id}/rubric-chunks",
+@exams_router.put(
+    "/{exam_id}/questions/{question_id}/rubric-chunks",
     response_model=Question,
-    tags=["catalog"],
 )
 async def map_question_chunks(
     exam_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     question_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     body: RubricChunkMappingRequest,
-    service: Annotated[GradingService, Depends(get_service)],
+    service: Annotated[CatalogService, Depends(get_catalog_service)],
 ) -> Question:
     try:
         return await service.map_question_chunks(
@@ -214,8 +217,8 @@ async def map_question_chunks(
         raise HTTPException(status_code=502, detail="Rubric storage failed.") from exc
 
 
-@router.post(
-    "/exams/{exam_id}/attempts",
+@exams_router.post(
+    "/{exam_id}/attempts",
     response_model=Attempt,
     status_code=201,
     tags=["attempts"],
@@ -223,7 +226,7 @@ async def map_question_chunks(
 async def create_attempt(
     exam_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     student_id: Annotated[str, Depends(require_student_id)],
-    service: Annotated[GradingService, Depends(get_service)],
+    service: Annotated[AttemptService, Depends(get_attempt_service)],
 ) -> Attempt:
     try:
         return await service.create_attempt(exam_id, student_id)
@@ -249,15 +252,15 @@ async def create_attempt(
         raise HTTPException(status_code=502, detail="Grading database failed.") from exc
 
 
-@router.get(
-    "/exams/{exam_id}/attempts",
+@exams_router.get(
+    "/{exam_id}/attempts",
     response_model=list[Attempt],
     tags=["attempts"],
 )
 async def list_attempts(
     exam_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     student_id: Annotated[str, Depends(require_student_id)],
-    service: Annotated[GradingService, Depends(get_service)],
+    service: Annotated[AttemptService, Depends(get_attempt_service)],
 ) -> list[Attempt]:
     try:
         return await service.list_attempts(exam_id, student_id)
@@ -265,8 +268,8 @@ async def list_attempts(
         raise HTTPException(status_code=404, detail="Exam not found.") from exc
 
 
-@router.post(
-    "/exams/{exam_id}/attempts/{attempt_id}/grade",
+@exams_router.post(
+    "/{exam_id}/attempts/{attempt_id}/grade",
     response_model=AttemptGradeResponse,
     tags=["grading"],
 )
@@ -275,7 +278,7 @@ async def grade_attempt(
     attempt_id: str,
     body: GradeAttemptRequest,
     student_id: Annotated[str, Depends(require_student_id)],
-    service: Annotated[GradingService, Depends(get_service)],
+    service: Annotated[AttemptService, Depends(get_attempt_service)],
 ) -> AttemptGradeResponse:
     try:
         return await service.grade_attempt(exam_id, attempt_id, student_id, body)
@@ -309,8 +312,8 @@ async def grade_attempt(
         raise HTTPException(status_code=502, detail="Grading database failed.") from exc
 
 
-@router.get(
-    "/exams/{exam_id}/attempts/{attempt_id}",
+@exams_router.get(
+    "/{exam_id}/attempts/{attempt_id}",
     response_model=AttemptGradeResponse,
     tags=["attempts"],
 )
@@ -318,7 +321,7 @@ async def get_attempt_result(
     exam_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     attempt_id: str,
     student_id: Annotated[str, Depends(require_student_id)],
-    service: Annotated[GradingService, Depends(get_service)],
+    service: Annotated[AttemptService, Depends(get_attempt_service)],
 ) -> AttemptGradeResponse:
     try:
         return await service.get_attempt_result(exam_id, attempt_id, student_id)

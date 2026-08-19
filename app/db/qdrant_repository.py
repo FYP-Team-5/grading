@@ -5,7 +5,7 @@ from typing import Any
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
-from app.model import RetrievedRubricChunk
+from app.dto import RetrievedRubricChunk
 
 
 class QdrantStoreError(RuntimeError):

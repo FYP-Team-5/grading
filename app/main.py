@@ -7,8 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from app.config import Settings, get_settings
-from app.controller import health_router, router
-from app.service import GradingService
+from app.controller import courses_router, exams_router, health_router
+from app.service import AttemptService, CatalogService, GradingService
 
 OPENAPI_TAGS = [
     {"name": "health", "description": "Storage and LLM dependency readiness status."},
@@ -62,6 +62,8 @@ def create_app(
     )
     app.state.settings = settings
     app.state.grading_service = grading_service
+    app.state.catalog_service = CatalogService(grading_service)
+    app.state.attempt_service = AttemptService(grading_service)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
@@ -70,7 +72,8 @@ def create_app(
         allow_headers=["*"],
     )
     app.include_router(health_router)
-    app.include_router(router, prefix=settings.api_v1_prefix)
+    app.include_router(courses_router, prefix=settings.api_v1_prefix)
+    app.include_router(exams_router, prefix=settings.api_v1_prefix)
 
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:

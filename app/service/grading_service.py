@@ -10,20 +10,15 @@ from app.db import (
     PostgresRubricMetadataRepository,
     QdrantRubricChunkRepository,
 )
-from app.model import (
-    Attempt,
+from app.dto import (
     AttemptGradeResponse,
-    Course,
     CourseCreate,
-    Exam,
     ExamCreate,
     ExamRubricUpdate,
     GradeAttemptRequest,
-    Question,
-    QuestionGrade,
     RetrievedRubricChunk,
-    RubricMetadata,
 )
+from app.model import Attempt, Course, Exam, Question, QuestionGrade, RubricMetadata
 from app.service.llm_client import LocalLLMClient
 
 PROMPT_VERSION = "2.0"

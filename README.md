@@ -41,6 +41,37 @@ Compose setup.
 | Response | Stores one student's answer for one question in an attempt |
 | Question grade | Stores score, feedback, criteria, rubric/chunk IDs, LLM model, and prompt version |
 
+### Database-backed models
+
+| Model | Attributes | Purpose |
+|---|---|---|
+| `Course` | `id`, `title`, `created_at` | Represents a course stored in `grading_courses`. |
+| `Exam` | `id`, `course_id`, `title`, `type`, `max_attempts`, `rubric_id`, `questions`, `created_at` | Represents an exam/quiz and its active rubric; persisted across `grading_exams` and its questions. |
+| `Question` | `id`, `exam_id` (table), `position`, `prompt`, `max_score`, `rubric_chunk_indexes` | Stores an ordered assessment question and its rubric-chunk mapping in `grading_questions`. |
+| `Attempt` | `id`, `exam_id`, `student_id`, `attempt_number`, `status`, `rubric_id`, `rubric_version`, `started_at`, `graded_at`, `error` | Records a student's assessment attempt and immutable rubric snapshot in `grading_attempts`. |
+| Response record | `id`, `attempt_id`, `question_id`, `answer`, `created_at`, `updated_at` | Stores one submitted answer per attempt/question in `grading_responses`. |
+| `QuestionGrade` | `question_id`, `score`, `max_score`, `percentage`, `feedback`, `criteria`, `rubric_chunk_ids` | Domain projection of a row in `grading_question_grades`, which also stores attempt/response IDs and LLM audit fields. |
+| `RubricMetadata` | `id`, `document_id`, `version`, `course_id`, `exam_id`, `processed`, `processing_status`, `processing_error`, `archived`, `chunk_count`, `chunk_ids` | Read-only model of RAG-owned rubric metadata used during grading. |
+
+### DTOs
+
+DTO definitions live in `app/dto/`; they are transport or service-boundary payloads and are not database entities.
+
+| DTO | Attributes | Purpose |
+|---|---|---|
+| `CourseCreate` | `id`, `title` | Course creation request. |
+| `QuestionCreate` | `id`, `prompt`, `max_score`, `rubric_chunk_indexes` | Nested question creation request. |
+| `ExamCreate` | `id`, `title`, `type`, `max_attempts`, `rubric_id`, `questions` | Exam/quiz creation request. |
+| `ExamRubricUpdate` | `rubric_id` | Selects a new active rubric for an exam. |
+| `RubricChunkMappingRequest` | `chunk_indexes` | Updates a question's rubric mapping. |
+| `QuestionResponseSubmission` | `question_id`, `answer` | Carries one submitted answer. |
+| `GradeAttemptRequest` | `responses`, `finalize` | Submits one or more answers for grading. |
+| `AttemptGradeResponse` | `attempt`, `grades`, `total_score`, `max_score`, `percentage`, `completed_questions`, `total_questions` | Aggregated attempt result returned by the API. |
+| `RetrievedRubricChunk` | `id`, `content`, `metadata` | Qdrant retrieval result passed into grading. |
+| `CriterionGrade` | `criterion`, `score`, `max_score`, `feedback` | One criterion in the LLM's structured output. |
+| `GradingResult` | `score`, `max_score`, `feedback`, `criteria` | Validated structured response from the grading LLM. |
+| `HealthResponse` | `status`, `postgres`, `qdrant`, `llm`, `model` | Health endpoint response. |
+
 ## Run with Docker
 
 Start the RAG project first because it provides PostgreSQL, Qdrant, and the external

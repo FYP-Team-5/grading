@@ -1,3 +1,3 @@
-from app.controller.api import health_router, router
+from app.controller.api import courses_router, exams_router, health_router
 
-__all__ = ["health_router", "router"]
+__all__ = ["courses_router", "exams_router", "health_router"]
