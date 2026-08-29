@@ -45,7 +45,7 @@ exams = Table(
     Column("title", String(300), nullable=False),
     Column("type", String(16), nullable=False),
     Column("max_attempts", Integer, nullable=False),
-    Column("rubric_id", String(128), nullable=False, unique=True),
+    Column("rubric_id", String(128), nullable=True, unique=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
@@ -193,13 +193,14 @@ class PostgresGradingRepository:
 
     def create_exam(self, course_id: str, request: ExamCreate) -> Exam:
         now = datetime.now(UTC)
+        exam_id = str(uuid.uuid4())
         try:
             with self.engine.begin() as connection:
                 if not self._course_exists(connection, course_id):
                     raise GradingRecordNotFoundError(course_id)
                 connection.execute(
                     insert(exams).values(
-                        id=request.id,
+                        id=exam_id,
                         course_id=course_id,
                         title=request.title,
                         type=request.type,
@@ -213,7 +214,7 @@ class PostgresGradingRepository:
                     [
                         {
                             "id": question.id,
-                            "exam_id": request.id,
+                            "exam_id": exam_id,
                             "position": position,
                             "prompt": question.prompt,
                             "max_score": question.max_score,
@@ -226,7 +227,7 @@ class PostgresGradingRepository:
             raise GradingConflictError(
                 "Exam, rubric, or question identifiers already exist."
             ) from exc
-        return self.get_exam(request.id)
+        return self.get_exam(exam_id)
 
     def get_exam(self, exam_id: str) -> Exam:
         try:

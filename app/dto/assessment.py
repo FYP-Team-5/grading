@@ -23,11 +23,10 @@ class QuestionCreate(BaseModel):
         return value
 
 class ExamCreate(BaseModel):
-    id: str = Field(pattern=ID_PATTERN)
     title: str = Field(min_length=1, max_length=300)
     type: Literal["exam", "quiz"] = "exam"
     max_attempts: int = Field(default=1, ge=1, le=100)
-    rubric_id: str = Field(pattern=ID_PATTERN)
+    rubric_id: str | None = Field(default=None, pattern=ID_PATTERN)
     questions: list[QuestionCreate] = Field(min_length=1, max_length=500)
     @model_validator(mode="after")
     def validate_question_ids(self) -> "ExamCreate":

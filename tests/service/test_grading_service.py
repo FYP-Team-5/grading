@@ -106,13 +106,13 @@ def make_grading_store() -> PostgresGradingRepository:
     return repository
 
 
-def make_rubric() -> RubricMetadata:
+def make_rubric(exam_id: str = "history-midterm") -> RubricMetadata:
     return RubricMetadata(
         id="history-rubric-v1",
         document_id="document-1",
         version="1",
         course_id="HIST-101",
-        exam_id="history-midterm",
+        exam_id=exam_id,
         processed=True,
         processing_status="completed",
         chunk_count=3,
@@ -122,7 +122,6 @@ def make_rubric() -> RubricMetadata:
 
 def exam_request(max_attempts: int = 2) -> ExamCreate:
     return ExamCreate(
-        id="history-midterm",
         title="History midterm",
         max_attempts=max_attempts,
         rubric_id="history-rubric-v1",
@@ -146,25 +145,29 @@ def exam_request(max_attempts: int = 2) -> ExamCreate:
 def make_service(*, wrong_scale: bool = False):
     grading_store = make_grading_store()
     llm = FakeLLMClient(wrong_scale=wrong_scale)
+    rubric = make_rubric()
     service = GradingService(
         Settings(),
-        rubric_store=FakeRubricStore(make_rubric()),
+        rubric_store=FakeRubricStore(rubric),
         grading_store=grading_store,
         chunk_store=FakeChunkStore(),
         llm_client=llm,
     )
     asyncio.run(service.create_course(CourseCreate(id="HIST-101", title="History")))
-    asyncio.run(service.create_exam("HIST-101", exam_request()))
-    return service, grading_store, llm
+    exam = asyncio.run(service.create_exam("HIST-101", exam_request()))
+    # The fake rubric was tagged with a guessed exam id; sync it to the real,
+    # server-generated one so ownership validation passes as it would in prod.
+    rubric.exam_id = exam.id
+    return service, grading_store, llm, exam.id
 
 
 def test_multi_question_attempt_is_graded_and_persisted() -> None:
-    service, grading_store, llm = make_service()
-    attempt = asyncio.run(service.create_attempt("history-midterm", "student-1"))
+    service, grading_store, llm, exam_id = make_service()
+    attempt = asyncio.run(service.create_attempt(exam_id, "student-1"))
 
     response = asyncio.run(
         service.grade_attempt(
-            "history-midterm",
+            exam_id,
             attempt.id,
             "student-1",
             GradeAttemptRequest(
@@ -193,12 +196,12 @@ def test_multi_question_attempt_is_graded_and_persisted() -> None:
 
 
 def test_single_question_calls_can_share_one_attempt_before_finalization() -> None:
-    service, _, _ = make_service()
-    attempt = asyncio.run(service.create_attempt("history-midterm", "student-1"))
+    service, _, _, exam_id = make_service()
+    attempt = asyncio.run(service.create_attempt(exam_id, "student-1"))
 
     partial = asyncio.run(
         service.grade_attempt(
-            "history-midterm",
+            exam_id,
             attempt.id,
             "student-1",
             GradeAttemptRequest(
@@ -214,7 +217,7 @@ def test_single_question_calls_can_share_one_attempt_before_finalization() -> No
     )
     final = asyncio.run(
         service.grade_attempt(
-            "history-midterm",
+            exam_id,
             attempt.id,
             "student-1",
             GradeAttemptRequest(
@@ -236,13 +239,13 @@ def test_single_question_calls_can_share_one_attempt_before_finalization() -> No
 
 
 def test_attempt_cannot_finalize_with_missing_questions() -> None:
-    service, _, _ = make_service()
-    attempt = asyncio.run(service.create_attempt("history-midterm", "student-1"))
+    service, _, _, exam_id = make_service()
+    attempt = asyncio.run(service.create_attempt(exam_id, "student-1"))
 
     with pytest.raises(IncompleteAttemptError, match="history-midterm-q2"):
         asyncio.run(
             service.grade_attempt(
-                "history-midterm",
+                exam_id,
                 attempt.id,
                 "student-1",
                 GradeAttemptRequest(
@@ -259,13 +262,13 @@ def test_attempt_cannot_finalize_with_missing_questions() -> None:
 
 
 def test_attempt_ownership_is_enforced() -> None:
-    service, _, _ = make_service()
-    attempt = asyncio.run(service.create_attempt("history-midterm", "student-1"))
+    service, _, _, exam_id = make_service()
+    attempt = asyncio.run(service.create_attempt(exam_id, "student-1"))
 
     with pytest.raises(AttemptStateError, match="does not belong"):
         asyncio.run(
             service.get_attempt_result(
-                "history-midterm",
+                exam_id,
                 attempt.id,
                 "student-2",
             )
@@ -273,21 +276,21 @@ def test_attempt_ownership_is_enforced() -> None:
 
 
 def test_exam_and_rubric_ownership_must_match() -> None:
-    service, _, _ = make_service()
+    service, _, _, exam_id = make_service()
     service.rubric_store.rubric.exam_id = "another-exam"
 
     with pytest.raises(RubricOwnershipError, match="does not match"):
-        asyncio.run(service.create_attempt("history-midterm", "student-1"))
+        asyncio.run(service.create_attempt(exam_id, "student-1"))
 
 
 def test_llm_cannot_change_question_score_scale() -> None:
-    service, grading_store, _ = make_service(wrong_scale=True)
-    attempt = asyncio.run(service.create_attempt("history-midterm", "student-1"))
+    service, grading_store, _, exam_id = make_service(wrong_scale=True)
+    attempt = asyncio.run(service.create_attempt(exam_id, "student-1"))
 
     with pytest.raises(LLMScoreScaleError, match="requires 10"):
         asyncio.run(
             service.grade_attempt(
-                "history-midterm",
+                exam_id,
                 attempt.id,
                 "student-1",
                 GradeAttemptRequest(

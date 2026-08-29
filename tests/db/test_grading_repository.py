@@ -15,7 +15,6 @@ def make_repository() -> PostgresGradingRepository:
 
 def make_exam(max_attempts: int = 1) -> ExamCreate:
     return ExamCreate(
-        id="history-midterm",
         title="History midterm",
         type="exam",
         max_attempts=max_attempts,
@@ -111,10 +110,10 @@ def test_attempt_limit_is_enforced_per_student_and_exam() -> None:
 def test_question_chunk_mapping_can_be_updated_after_rubric_processing() -> None:
     repository = make_repository()
     repository.create_course("HIST-101", "History")
-    repository.create_exam("HIST-101", make_exam())
+    exam = repository.create_exam("HIST-101", make_exam())
 
     question = repository.update_question_chunk_indexes(
-        "history-midterm",
+        exam.id,
         "history-midterm-q1",
         [3, 4],
     )

@@ -22,7 +22,7 @@ class Exam(BaseModel):
     title: str
     type: Literal["exam", "quiz"]
     max_attempts: int
-    rubric_id: str
+    rubric_id: str | None = None
     questions: list[Question]
     created_at: datetime
 
